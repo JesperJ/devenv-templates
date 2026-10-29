@@ -1,6 +1,8 @@
 {
   description = "devenv templates and devenvify";
 
+  # Thin wrapper around package.nix, for `nix run` and `nix flake init`.
+  # Configs can skip the flake: `flake = false` input + callPackage package.nix.
   inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
 
   outputs = { self, nixpkgs }:
@@ -8,21 +10,10 @@
       forAllSystems = nixpkgs.lib.genAttrs [ "x86_64-linux" "aarch64-linux" ];
     in
     {
-      packages = forAllSystems (system:
-        let pkgs = nixpkgs.legacyPackages.${system};
-        in rec {
-          # The templates are bundled in the store, so devenvify works on machines
-          # without this repo checked out. Set DEVENV_TEMPLATES_DIR to a checkout to
-          # try template edits without rebuilding.
-          devenvify = pkgs.writeShellApplication {
-            name = "devenvify";
-            runtimeInputs = with pkgs; [ coreutils findutils gnused gnugrep ];
-            text = ''
-              export DEVENV_TEMPLATES_DIR="''${DEVENV_TEMPLATES_DIR:-${self}}"
-            '' + builtins.readFile ./devenvify;
-          };
-          default = devenvify;
-        });
+      packages = forAllSystems (system: rec {
+        devenvify = nixpkgs.legacyPackages.${system}.callPackage ./package.nix { };
+        default = devenvify;
+      });
 
       # Same templates without the script: `nix flake init -t <this flake>#dotnet-mssql`
       # (plain copy - no .gitignore merge, no direnv allow).
