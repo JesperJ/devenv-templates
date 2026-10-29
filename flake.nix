@@ -17,6 +17,10 @@
 
       # Same templates without the script: `nix flake init -t <this flake>#dotnet-mssql`
       # (plain copy - no .gitignore merge, no direnv allow).
+      templates.dotnet = {
+        path = ./dotnet;
+        description = ".NET 10 + 8";
+      };
       templates.dotnet-mssql = {
         path = ./dotnet-mssql;
         description = ".NET 10 + 8 with SQL Server in Docker";
