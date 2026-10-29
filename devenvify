@@ -1,0 +1,93 @@
+#!/usr/bin/env bash
+# devenvify - copy a devenv template into a folder.
+#
+#   devenvify                 list templates
+#   devenvify <template> [dir] [-f]
+#
+# Templates live in $DEVENV_TEMPLATES_DIR (default ~/code/repos/devenv-templates),
+# one subfolder each. Every file is copied as-is, except:
+#   - `gitignore` is not copied; its lines are appended to the target's .gitignore
+#     when missing.
+#   - `@NAME@` is replaced with the target folder's name (lowercased, [a-z0-9-]).
+# Existing files are left alone unless -f is given.
+set -euo pipefail
+
+templates_dir="${DEVENV_TEMPLATES_DIR:-$HOME/code/repos/devenv-templates}"
+
+list_templates() {
+  echo "Templates in $templates_dir:"
+  for t in "$templates_dir"/*/; do
+    [ -d "$t" ] && echo "  $(basename "$t")"
+  done
+}
+
+force=0
+args=()
+for a in "$@"; do
+  case "$a" in
+    -f | --force) force=1 ;;
+    -h | --help)
+      echo "usage: devenvify [<template> [dir] [-f]]  (no args lists templates)"
+      exit 0
+      ;;
+    *) args+=("$a") ;;
+  esac
+done
+
+if [ "${#args[@]}" -eq 0 ]; then
+  list_templates
+  exit 0
+fi
+
+template="${args[0]}"
+target="$(realpath "${args[1]:-.}")"
+src="$templates_dir/$template"
+
+if [ ! -d "$src" ]; then
+  echo "No template '$template'." >&2
+  list_templates >&2
+  exit 1
+fi
+mkdir -p "$target"
+
+name="$(basename "$target" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9-]/-/g')"
+
+while IFS= read -r -d '' file; do
+  rel="${file#"$src"/}"
+  [ "$rel" = gitignore ] && continue
+  dest="$target/$rel"
+  if [ -e "$dest" ] && [ "$force" -eq 0 ]; then
+    echo "skip   $rel (exists, -f to overwrite)"
+    continue
+  fi
+  mkdir -p "$(dirname "$dest")"
+  sed "s/@NAME@/$name/g" "$file" > "$dest"
+  # Keep the executable bit, but not the Nix store's read-only mode.
+  chmod --reference="$file" "$dest"
+  chmod u+w "$dest"
+  echo "wrote  $rel"
+done < <(find "$src" -type f -print0)
+
+if [ -f "$src/gitignore" ]; then
+  touch "$target/.gitignore"
+  added=0
+  while IFS= read -r line; do
+    [ -z "$line" ] && continue
+    # Whole-line match; the \r variant counts a CRLF .gitignore's line as present.
+    if ! grep -qxF -e "$line" -e "$line"$'\r' "$target/.gitignore"; then
+      if [ "$added" -eq 0 ]; then
+        # Start on a fresh line, with a header.
+        [ -s "$target/.gitignore" ] && [ -n "$(tail -c1 "$target/.gitignore")" ] && echo >> "$target/.gitignore"
+        printf '\n# devenv\n' >> "$target/.gitignore"
+      fi
+      echo "$line" >> "$target/.gitignore"
+      added=$((added + 1))
+    fi
+  done < "$src/gitignore"
+  [ "$added" -gt 0 ] && echo "added  $added line(s) to .gitignore"
+fi
+
+if command -v direnv >/dev/null 2>&1 && [ -f "$target/.envrc" ]; then
+  direnv allow "$target"
+  echo "direnv allowed - cd in (or 'direnv reload') to build the shell"
+fi
