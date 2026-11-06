@@ -1,0 +1,4 @@
+# LF everywhere, including a Windows checkout: devenvify and the templates are
+# run and read from inside WSL, where a CRLF script fails on its first line
+# ("set: pipefail\r: invalid option name").
+* text=auto eol=lf

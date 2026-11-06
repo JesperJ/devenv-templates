@@ -9,10 +9,38 @@
 #   - `gitignore` is not copied; its lines are appended to the target's .gitignore
 #     when missing.
 #   - `@NAME@` is replaced with the target folder's name (lowercased, [a-z0-9-]).
+#   - a devenv.yaml it writes gets devenv's own modules pinned to the version
+#     of the devenv on this machine (see pin_devenv).
 # Existing files are left alone unless -f is given.
 set -euo pipefail
 
 templates_dir="${DEVENV_TEMPLATES_DIR:-$HOME/code/repos/devenv-templates}"
+
+# Pin devenv's modules to the devenv installed here. A devenv.yaml with no
+# devenv input gets the newest devenv on GitHub locked in at the first build
+# -- not the version of the devenv command doing the build -- and a command
+# older than its modules prints errors into every shell it loads. Pinned to
+# the installed version, the modules can never be newer than the command, and
+# a later, newer devenv still loads them fine.
+#
+# Added here rather than written into the templates, so a template stays a
+# valid devenv.yaml for `nix flake init -t`, which copies files verbatim.
+pin_devenv() {
+  local yaml=$1 version
+  grep -qE '^[[:space:]]+devenv:' "$yaml" && return 0
+  version=$(devenv version 2>/dev/null | sed -nE 's/^devenv ([0-9]+\.[0-9]+\.[0-9]+).*/v\1/p' || true)
+  if [ -z "$version" ]; then
+    echo "note   no devenv on PATH; devenv.yaml left without a devenv pin" >&2
+    return 0
+  fi
+  local block="  devenv:\n    url: github:cachix/devenv/$version"
+  if grep -qE '^inputs:[[:space:]]*$' "$yaml"; then
+    sed -i -E "0,/^inputs:[[:space:]]*$/s||inputs:\n$block|" "$yaml"
+  else
+    printf 'inputs:\n%b\n' "$block" >> "$yaml"
+  fi
+  echo "pinned devenv $version in devenv.yaml"
+}
 
 list_templates() {
   echo "Templates in $templates_dir:"
@@ -66,6 +94,7 @@ while IFS= read -r -d '' file; do
   chmod --reference="$file" "$dest"
   chmod u+w "$dest"
   echo "wrote  $rel"
+  if [ "$rel" = devenv.yaml ]; then pin_devenv "$dest"; fi
 done < <(find "$src" -type f -print0)
 
 if [ -f "$src/gitignore" ]; then
