@@ -1,3 +1,11 @@
 inputs:
   nixpkgs:
     url: github:cachix/devenv-nixpkgs/rolling
+  # The shared .NET and SQL Server setup, imported below rather than copied
+  # into this repo. devenv.lock pins the commit; `update-shared` moves it.
+  devenv-templates:
+    url: github:JesperJ/devenv-templates
+    flake: false
+imports:
+  - devenv-templates/modules/dotnet
+  - devenv-templates/modules/mssql
