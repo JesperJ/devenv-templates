@@ -1,5 +1,5 @@
 # SQL Server for local development, shared the same way as ../dotnet: projects
-# import it, alongside the .NET module (see ../../dotnet-mssql/devenv.yaml).
+# import it, alongside the .NET parts (see ../../dotnet-mssql/devenv.yaml).
 { pkgs, lib, config, ... }:
 
 let

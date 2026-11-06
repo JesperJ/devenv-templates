@@ -1,11 +1,13 @@
 inputs:
   nixpkgs:
     url: github:cachix/devenv-nixpkgs/rolling
-  # The shared .NET and SQL Server setup, imported below rather than copied
-  # into this repo. devenv.lock pins the commit; `update-shared` moves it.
+  # The shared setup, imported below rather than copied into this repo.
+  # devenv.lock pins the commit; `update-shared` moves it.
   devenv-templates:
     url: github:JesperJ/devenv-templates
     flake: false
+# The parts this project uses. Drop dotnet-runtime-8 once nothing targets net8.0.
 imports:
   - devenv-templates/modules/dotnet
+  - devenv-templates/modules/dotnet-runtime-8
   - devenv-templates/modules/mssql

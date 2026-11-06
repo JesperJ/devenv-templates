@@ -11,7 +11,9 @@
     in
     {
       packages = forAllSystems (system: rec {
-        devenvify = nixpkgs.legacyPackages.${system}.callPackage ./package.nix { };
+        devenvify = nixpkgs.legacyPackages.${system}.callPackage ./package.nix {
+          rev = self.shortRev or self.dirtyShortRev or null;
+        };
         default = devenvify;
       });
 
@@ -19,11 +21,11 @@
       # (plain copy - no .gitignore merge, no direnv allow).
       templates.dotnet = {
         path = ./dotnet;
-        description = ".NET 10 + 8";
+        description = ".NET 10 SDK + .NET 8 runtime";
       };
       templates.dotnet-mssql = {
         path = ./dotnet-mssql;
-        description = ".NET 10 + 8 with SQL Server in Docker";
+        description = ".NET 10 SDK + .NET 8 runtime, with SQL Server in Docker";
       };
     };
 }

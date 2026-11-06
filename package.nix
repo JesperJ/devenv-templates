@@ -3,12 +3,17 @@
 # template edits without rebuilding.
 #
 #   pkgs.callPackage ./package.nix { }
+#   pkgs.callPackage ./package.nix { rev = devenv-templates.shortRev; }  # a flake input
+#
+# rev, when given, is the commit --copy names in the files it copies.
 {
+  lib,
   writeShellApplication,
   coreutils,
   findutils,
   gnused,
   gnugrep,
+  rev ? null,
 }:
 let
   # Only the template folders; the top-level files are this packaging.
@@ -30,6 +35,9 @@ writeShellApplication {
   ];
   text = ''
     export DEVENV_TEMPLATES_DIR="''${DEVENV_TEMPLATES_DIR:-${templates}}"
+  ''
+  + lib.optionalString (rev != null) ''
+    export DEVENV_TEMPLATES_REV="${rev}"
   ''
   + builtins.readFile ./devenvify;
 }

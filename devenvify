@@ -1,33 +1,59 @@
 #!/usr/bin/env bash
 # devenvify - set a folder up with one of the shared devenv templates.
 #
-#   devenvify                          list templates
-#   devenvify <template> [dir] [-f]    write the template into a project
-#   devenvify --bind <template> [dir]  use it in a repo you can't commit to
+#   devenvify                                   list templates and modes
+#   devenvify --shared   <template> [dir] [-f]  import the shared parts
+#   devenvify --copy     <template> [dir] [-f]  copy them into the repo
+#   devenvify --personal <template> [dir]       bind on this machine only
 #
-# A template is thin: a devenv.yaml that IMPORTS the shared setup from
-# devenv-templates/modules (pinned in the project's devenv.lock, moved with
-# `update-shared`), a near-empty devenv.nix for the project's own additions,
-# .envrc and .vscode/. Templates live in $DEVENV_TEMPLATES_DIR (default
-# ~/code/repos/devenv-templates), one subfolder with a devenv.yaml each. Every
-# file is copied as-is, except:
+# The mode decides who owns the setup, and there is no default: devenvify
+# stops and explains when none is given.
+#
+# A template is a preset of parts. Its devenv.yaml lists the parts it uses
+# from devenv-templates/modules under `imports:`, next to a near-empty
+# devenv.nix for the project's own additions, .envrc and .vscode/. Templates
+# live in $DEVENV_TEMPLATES_DIR (default ~/code/repos/devenv-templates), one
+# subfolder with a devenv.yaml each. Every file is copied as-is, except:
 #   - `gitignore` is not copied; its lines are appended to the target's .gitignore
 #     when missing.
 #   - `@NAME@` is replaced with the target folder's name (lowercased, [a-z0-9-]).
 #   - a devenv.yaml it writes gets devenv's own modules pinned to the version
 #     of the devenv on this machine (see pin_devenv).
+#   - with --copy, devenv.yaml imports the parts from devenv-shared/ in the
+#     repo instead, and the parts are copied there.
 # Existing files are left alone unless -f is given.
-#
-# --bind writes nothing into the repo: devenv remembers, on this machine only,
-# that the folder uses from/<template> (`devenv --from ... allow`).
 set -euo pipefail
 
 templates_dir="${DEVENV_TEMPLATES_DIR:-$HOME/code/repos/devenv-templates}"
 
 # Where projects fetch devenv-templates from: the devenv.yaml imports, and
-# --bind. Override to try changes before they are pushed, e.g.
-#   DEVENV_TEMPLATES_REPO=path:$HOME/code/repos/devenv-templates devenvify dotnet
+# --personal. Override to try changes before they are pushed, e.g.
+#   DEVENV_TEMPLATES_REPO=path:$HOME/code/repos/devenv-templates devenvify --shared dotnet
 templates_repo="${DEVENV_TEMPLATES_REPO:-github:JesperJ/devenv-templates}"
+
+explain_modes() {
+  cat <<'EOF'
+Pick who owns the setup:
+
+  --shared    devenv.yaml imports the shared parts from devenv-templates.
+              devenv.lock pins the commit; `update-shared` takes a newer one.
+              One setup for every project, improved in one place.
+
+  --copy      the parts are copied into the repo, in devenv-shared/, and are
+              the repo's own from then on: no devenv-templates input, nothing
+              pulled. Edit them freely; nobody else's change reaches them.
+
+  --personal  nothing goes into the repo's history: this machine binds the
+              folder to the template (devenv --from). For a repo you can't
+              commit devenv files to. Follows devenv-templates' main.
+
+In every mode devenv.lock pins nixpkgs, and so the SDK; `update-toolchain`
+moves it. With --shared and --copy that lock is committed; with --personal
+it stays on this machine.
+
+  e.g.  devenvify --shared dotnet
+EOF
+}
 
 # Pin devenv's modules to the devenv installed here. A devenv.yaml with no
 # devenv input gets the newest devenv on GitHub locked in at the first build
@@ -63,11 +89,71 @@ list_templates() {
   done
 }
 
-# Use a template in a repo that must not get devenv files: a customer's, an
-# open-source project. devenv binds the folder to from/<template> on this
-# machine only; colleagues who want the same run the same command.
+# The parts a template uses: the devenv-templates/modules/<part> lines under
+# `imports:` in its devenv.yaml.
+template_parts() {
+  sed -nE 's|^[[:space:]]*-[[:space:]]*devenv-templates/modules/([^[:space:]]+)[[:space:]]*$|\1|p' "$1/devenv.yaml"
+}
+
+# Write one file into the target, honouring -f: <rel> <template file>, with
+# the content read from the template file, or from [input] (/dev/stdin when
+# the content is piped in). Returns 1 if the file was skipped.
+write_file() {
+  local rel=$1 src=$2 input=${3:-$2} dest="$target/$1"
+  if [ -e "$dest" ] && [ "$force" -eq 0 ]; then
+    echo "skip   $rel (exists, -f to overwrite)"
+    [ "$input" = /dev/stdin ] && cat > /dev/null
+    return 1
+  fi
+  mkdir -p "$(dirname "$dest")"
+  sed -e "s/@NAME@/$name/g" -e "s|github:JesperJ/devenv-templates|$templates_repo|g" "$input" > "$dest"
+  # Keep the executable bit, but not the Nix store's read-only mode.
+  chmod --reference="$src" "$dest"
+  chmod u+w "$dest"
+  echo "wrote  $rel"
+}
+
+# --copy: the template's devenv.yaml without the devenv-templates input, its
+# imports pointing at the copies in devenv-shared/.
+copy_yaml() {
+  sed -E \
+    -e '/^  # The shared setup/,/^    flake: false/d' \
+    -e 's|^# The parts this project uses\.|# The parts this project uses, copied into devenv-shared/ by devenvify --copy\n# and owned by this repo.|' \
+    -e 's|devenv-templates/modules/|./devenv-shared/|' \
+    "$1"
+}
+
+# --copy: the parts themselves, each with a note on where it came from.
+copy_parts() {
+  local part from rev
+  # A checkout knows its commit; the packaged devenvify is told it.
+  rev=$(git -C "$templates_dir" rev-parse --short HEAD 2>/dev/null || echo "${DEVENV_TEMPLATES_REV:-}")
+  from="devenv-templates${rev:+ $rev}"
+  for part in "${parts[@]}"; do
+    local dir="$templates_dir/modules/$part"
+    if [ ! -f "$dir/devenv.nix" ]; then
+      echo "Template '$template' imports a part that does not exist: modules/$part" >&2
+      exit 1
+    fi
+    while IFS= read -r -d '' file; do
+      local rel="devenv-shared/$part/${file#"$dir"/}"
+      if [ "${file##*.}" = nix ]; then
+        { printf '# Copied from %s modules/%s by devenvify --copy, %s.\n' "$from" "$part" "$(date +%F)"
+          printf "# This repo's own copy now: edit it freely; update-shared does not touch it.\n#\n"
+          cat "$file"; } | write_file "$rel" "$file" /dev/stdin || true
+      else
+        write_file "$rel" "$file" || true
+      fi
+    done < <(find "$dir" -type f -print0)
+  done
+}
+
+# --personal: use a template in a repo that must not get devenv files: a
+# customer's, an open-source project. devenv binds the folder to
+# from/<template> on this machine only; colleagues who want the same run the
+# same command.
 bind() {
-  local template=$1 target=$2 src
+  local src
   if [ ! -f "$templates_dir/from/$template/devenv.nix" ]; then
     echo "No template '$template' to bind." >&2
     list_templates >&2
@@ -75,6 +161,13 @@ bind() {
   fi
   if ! command -v devenv >/dev/null 2>&1; then
     echo "devenv is not on PATH." >&2
+    exit 1
+  fi
+  # A devenv.nix in the folder silently replaces a binding -- the shell would
+  # be the folder's, not the template's.
+  if [ -e "$target/devenv.nix" ]; then
+    echo "$target has its own devenv.nix, which would replace the binding." >&2
+    echo "Use --shared or --copy here, or remove devenv.nix first." >&2
     exit 1
   fi
   case "$templates_repo" in
@@ -115,17 +208,34 @@ EOF
 }
 
 force=0
-bind_mode=0
+mode=
 args=()
 for a in "$@"; do
   case "$a" in
     -f | --force) force=1 ;;
-    --bind) bind_mode=1 ;;
+    --shared | --copy | --personal)
+      if [ -n "$mode" ] && [ "$mode" != "${a#--}" ]; then
+        echo "Pick one of --shared, --copy and --personal." >&2
+        exit 1
+      fi
+      mode=${a#--}
+      ;;
+    --bind)
+      echo "--bind is now --personal." >&2
+      exit 1
+      ;;
     -h | --help)
-      echo "usage: devenvify [<template> [dir] [-f]]     write a template into a project"
-      echo "       devenvify --bind <template> [dir]     use it without writing files"
-      echo "       devenvify                             list templates"
+      echo "usage: devenvify --shared   <template> [dir] [-f]   import the shared parts"
+      echo "       devenvify --copy     <template> [dir] [-f]   copy them into the repo"
+      echo "       devenvify --personal <template> [dir]        bind on this machine only"
+      echo "       devenvify                                    list templates and modes"
+      echo
+      explain_modes
       exit 0
+      ;;
+    -*)
+      echo "Unknown option: $a (devenvify -h)" >&2
+      exit 1
       ;;
     *) args+=("$a") ;;
   esac
@@ -133,6 +243,8 @@ done
 
 if [ "${#args[@]}" -eq 0 ]; then
   list_templates
+  echo
+  explain_modes
   exit 0
 fi
 
@@ -140,36 +252,39 @@ template="${args[0]}"
 target="$(realpath "${args[1]:-.}")"
 src="$templates_dir/$template"
 
-if [ "$bind_mode" -eq 1 ]; then
-  bind "$template" "$target"
-  exit 0
-fi
-
 if [ ! -f "$src/devenv.yaml" ]; then
   echo "No template '$template'." >&2
   list_templates >&2
   exit 1
 fi
-mkdir -p "$target"
+if [ -z "$mode" ]; then
+  echo "devenvify $template: which mode?" >&2
+  echo >&2
+  explain_modes >&2
+  exit 1
+fi
 
+if [ "$mode" = personal ]; then
+  bind
+  exit 0
+fi
+
+mkdir -p "$target"
 name="$(basename "$target" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9-]/-/g')"
+mapfile -t parts < <(template_parts "$src")
 
 while IFS= read -r -d '' file; do
   rel="${file#"$src"/}"
   [ "$rel" = gitignore ] && continue
-  dest="$target/$rel"
-  if [ -e "$dest" ] && [ "$force" -eq 0 ]; then
-    echo "skip   $rel (exists, -f to overwrite)"
-    continue
+  if [ "$rel" = devenv.yaml ] && [ "$mode" = copy ]; then
+    copy_yaml "$file" | write_file "$rel" "$file" /dev/stdin || continue
+  else
+    write_file "$rel" "$file" || continue
   fi
-  mkdir -p "$(dirname "$dest")"
-  sed -e "s/@NAME@/$name/g" -e "s|github:JesperJ/devenv-templates|$templates_repo|g" "$file" > "$dest"
-  # Keep the executable bit, but not the Nix store's read-only mode.
-  chmod --reference="$file" "$dest"
-  chmod u+w "$dest"
-  echo "wrote  $rel"
-  if [ "$rel" = devenv.yaml ]; then pin_devenv "$dest"; fi
+  if [ "$rel" = devenv.yaml ]; then pin_devenv "$target/$rel"; fi
 done < <(find "$src" -type f -print0)
+
+if [ "$mode" = copy ]; then copy_parts; fi
 
 if [ -f "$src/gitignore" ]; then
   touch "$target/.gitignore"
