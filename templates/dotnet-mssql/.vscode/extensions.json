@@ -4,7 +4,7 @@
   // this project's glibc; without direnv loading that environment into the
   // extension host, those variables never reach it and the Dev Kit fails with
   // "Failed to create CoreCLR, HRESULT: 0x80008088". See modules/dotnet/devenv.nix
-  // in devenv-templates (devenv-shared/dotnet/ in a repo set up with --copy).
+  // in devenv-templates (.shared-devenv/dotnet/ in a repo set up with --copy).
   //
   // Deleting .vscode/ silently uninstalls these again -- which is exactly how
   // the fix appeared not to work the first time it was tried.

@@ -1,8 +1,10 @@
 {
   description = "devenv templates and devenvify";
 
-  # Thin wrapper around package.nix, for `nix run` and `nix flake init`.
+  # Thin wrapper around package.nix, for `nix run` and `nix build`.
   # Configs can skip the flake: `flake = false` input + callPackage package.nix.
+  # The templates are not offered for `nix flake init -t`: that would set a
+  # project up without choosing a mode. devenvify is the way in.
   inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
 
   outputs = { self, nixpkgs }:
@@ -16,16 +18,5 @@
         };
         default = devenvify;
       });
-
-      # Same templates without the script: `nix flake init -t <this flake>#dotnet-mssql`
-      # (plain copy - no .gitignore merge, no direnv allow).
-      templates.dotnet = {
-        path = ./dotnet;
-        description = ".NET 10 SDK + .NET 8 runtime";
-      };
-      templates.dotnet-mssql = {
-        path = ./dotnet-mssql;
-        description = ".NET 10 SDK + .NET 8 runtime, with SQL Server in Docker";
-      };
     };
 }

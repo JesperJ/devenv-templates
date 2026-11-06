@@ -19,8 +19,8 @@ decides who owns the setup:
 | Mode | What the repo gets | Who owns the setup | It changes when |
 |---|---|---|---|
 | `--shared` | a `devenv.yaml` that imports the parts from this repo | this repo; the project's `devenv.lock` pins which commit | someone runs `update-shared` in the project |
-| `--copy` | the parts themselves, in `devenv-shared/` | the project, outright | someone edits `devenv-shared/` |
-| `--personal` | nothing in its history | this repo's `main`, bound on your machine only | this repo changes |
+| `--copy` | the parts themselves, in `.shared-devenv/` | the project, outright | someone edits `.shared-devenv/` |
+| `--personal` | nothing in its history | you: the template is written to a folder on your machine, the lock pins which commit | you run `update-shared` there |
 
 In every mode the project's `devenv.lock` pins nixpkgs, and with it the .NET
 SDK and runtimes; `update-toolchain` moves it.
@@ -33,16 +33,24 @@ first `cd`.
 
 **`--copy`** is for a project that must not depend on this repo: one handed
 over to a customer, or that needs the setup changed in ways nobody else
-wants. Commit the same files plus `devenv-shared/`. Each copied file says
+wants. Commit the same files plus `.shared-devenv/`. Each copied file says
 which commit it came from; nothing here reaches it again unless you take it
-with `devenvify --copy <template> -f`.
+with `devenvify --copy <template> -f`. Its `devenv.yaml` imports the parts
+as folders in the repo (`./.shared-devenv/dotnet`), so its `devenv.lock` has
+no devenv-templates in it.
 
 **`--personal`** is for a repo you can't or don't want to commit devenv files
-to -- a customer's, an open-source project. devenv remembers on this machine
-that the folder uses the template (`devenv --from ... allow`); its own files
-and the `.envrc` are hidden from git in `.git/info/exclude`, which belongs to
-your clone alone. It refuses a folder with a `devenv.nix` of its own, which
-would silently replace the binding.
+to -- a customer's, an open-source project. The template's `devenv.yaml`
+goes into a folder on your machine,
+`~/.local/share/devenvify/personal/<folder>-<hash>/`, with a `devenv.nix` for
+your own additions, and devenv binds the repo to it
+(`devenv --from ... allow`). It works like `--shared` from there: the lock
+pins the commit, `update-shared` moves it, and you choose parts by editing
+that `devenv.yaml`. devenv's files in the repo -- the lock, `.devenv/`, the
+`.envrc` -- are hidden from git in `.git/info/exclude`, which belongs to your
+clone alone. It refuses a folder with a `devenv.nix` or `devenv.yaml` of its
+own, which would override the binding. A rerun keeps your folder;
+`-f` starts it over from the template.
 
 ## Parts and templates
 
@@ -65,18 +73,22 @@ needs the .NET 8 runtime. The runtime alone is a fraction of SDK 8 (about
 bridge: once a project targets net10.0 everywhere, remove
 `dotnet-runtime-8` from the `imports:` in its `devenv.yaml`.
 
-With `--shared` and `--copy`, the parts a project uses are the `imports:` in
-its `devenv.yaml`, and changing them is a one-line edit. With `--personal`
-there is nothing in the repo to edit, so it takes a template as a whole.
+In every mode the parts a project uses are the `imports:` in its
+`devenv.yaml` -- the repo's, or with `--personal` the one on your machine --
+and changing them is a one-line edit.
 
 ```
-modules/<part>/       the parts                 <- --shared imports, --copy copies
-dotnet/               templates: a devenv.yaml listing the parts, a near-empty
-dotnet-mssql/         devenv.nix for the project's own additions, .envrc, .vscode/
-from/dotnet/          the same presets for --personal (devenv --from)
-from/dotnet-mssql/
-devenvify             the command
+modules/<part>/         the parts: the setup itself
+templates/<template>/   what a project gets: devenv.yaml listing the parts,
+                        devenv.nix for its own additions, .envrc, .vscode/,
+                        and the lines devenvify adds to .gitignore
+devenvify               the command
+package.nix, flake.nix  devenvify packaged with the templates and parts
 ```
+
+One template serves all three modes. `--shared` writes it as it is,
+`--copy` rewrites its `imports:` to `./.shared-devenv/<part>` and copies
+the parts in, and `--personal` writes it to the folder on your machine.
 
 ## How --shared stays put
 
@@ -97,8 +109,9 @@ reaches a project when someone runs, in that project:
 | `update-shared` | only this repo's parts | runs the tests, shows the lock diff |
 | `update-toolchain` | everything: SDK, nixpkgs, this repo | runs the tests, shows the lock diff |
 
-Commit the lock change like any dependency bump; `git checkout devenv.lock`
-undoes it.
+Commit the lock change like any dependency bump. Both keep the lock from
+before in `.devenv/devenv.lock.before`, and say how to put it back if the
+tests fail.
 
 ## Changing the shared setup
 
@@ -113,10 +126,8 @@ here. A shared value a project must differ on is overridden there with
 `lib.mkForce`.
 
 A new part is a folder in `modules/` with a `devenv.nix`. To make it part of
-a template, list it in the template's `devenv.yaml` and in its `from/`
-`devenv.nix`. The `from/` folders join parts with Nix `imports = [ ... ]`
-rather than `devenv.yaml` `imports:`, because devenv refuses yaml imports
-that reach outside the folder `--from` points at.
+a template, list it under `imports:` in the template's `devenv.yaml` -- the
+one place, for all three modes. A new template is a folder in `templates/`.
 
 Parts that add runtimes do it through `shared.dotnet.runtimes`, a list the
 dotnet part declares and puts next to the SDK on the one `dotnet` command.
@@ -127,9 +138,11 @@ dotnet part declares and puts next to the SDK on the one `dotnet` command.
   devenv installed on the machine. Unpinned, the first build locks the newest
   devenv on GitHub, and a devenv command older than its modules prints errors
   (`structuredAttrs: command not found`) into every shell.
-- The templates also work with `nix flake init -t github:JesperJ/devenv-templates#dotnet`,
-  which copies them verbatim: the `--shared` setup, without the `.gitignore`
-  merge or the devenv pin.
+- There is no `nix flake init -t` for the templates: it would set a project
+  up without a mode and without the devenv pin. `devenvify` is the way in.
+- `--personal` imports the parts through the devenv-templates input, never
+  by relative path: devenv refuses `imports:` in a `--from` folder that reach
+  outside it, but inputs are fine.
 - `NIX_LD` in the dotnet part is not only for VS Code: `dotnet run` starts
   the app through a launcher Microsoft builds, which needs it just as the
   C# Dev Kit does. The comment in `modules/dotnet/devenv.nix` has the detail.

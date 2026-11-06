@@ -10,6 +10,19 @@
 let
   # Project name for the shell banner, taken from the project folder.
   name = lib.toLower (baseNameOf config.devenv.root);
+
+  # For the update scripts. The lock is kept before an update, so it can be
+  # put back -- with --personal it is not in git, so `git checkout` cannot.
+  keepLock = ''
+    mkdir -p .devenv && cp devenv.lock .devenv/devenv.lock.before
+  '';
+  showLock = ''
+    if git ls-files --error-unmatch devenv.lock >/dev/null 2>&1; then
+      git --no-pager diff --stat devenv.lock
+    else
+      echo "devenv.lock updated (kept on this machine, not in git)"
+    fi
+  '';
 in
 {
   # How the parts join: each adds the runtimes it brings to this list, and
@@ -90,22 +103,21 @@ in
         set -euo pipefail
         cd "$DEVENV_ROOT"
 
-        if ! grep -qs '^  devenv-templates:' devenv.yaml; then
-          if [ -d devenv-shared ]; then
-            echo "This repo has its own copy of the shared setup, in devenv-shared/ (devenvify --copy)."
-            echo "Nothing to pull: edit it there, or take the current one with 'devenvify --copy <template> -f'."
-          else
-            echo "This folder is bound with devenvify --personal: it already follows devenv-templates' main."
-          fi
+        # --shared and --personal lock devenv-templates; --copy has its own
+        # copy of the parts and no such input.
+        if ! grep -qs '"devenv-templates"' devenv.lock; then
+          echo "This repo has its own copy of the shared setup, in .shared-devenv/ (devenvify --copy)."
+          echo "Nothing to pull: edit it there, or take the current one with 'devenvify --copy <template> -f'."
           exit 0
         fi
 
+        ${keepLock}
         devenv update devenv-templates
         if ! devenv shell -- run-tests; then
-          echo "FAILED on the new shared setup - 'git checkout devenv.lock' to revert" >&2
+          echo "FAILED on the new shared setup - to go back: cp .devenv/devenv.lock.before devenv.lock" >&2
           exit 1
         fi
-        git --no-pager diff --stat devenv.lock
+        ${showLock}
       '';
 
       # Update everything pinned -- the SDK, nixpkgs, the shared setup -- and
@@ -116,12 +128,13 @@ in
         set -euo pipefail
         cd "$DEVENV_ROOT"
 
+        ${keepLock}
         devenv update
         if ! devenv shell -- run-tests; then
-          echo "FAILED on the new toolchain - 'git checkout devenv.lock' to revert" >&2
+          echo "FAILED on the new toolchain - to go back: cp .devenv/devenv.lock.before devenv.lock" >&2
           exit 1
         fi
-        git --no-pager diff --stat devenv.lock
+        ${showLock}
       '';
     };
 

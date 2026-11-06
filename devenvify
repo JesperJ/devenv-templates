@@ -12,14 +12,16 @@
 # A template is a preset of parts. Its devenv.yaml lists the parts it uses
 # from devenv-templates/modules under `imports:`, next to a near-empty
 # devenv.nix for the project's own additions, .envrc and .vscode/. Templates
-# live in $DEVENV_TEMPLATES_DIR (default ~/code/repos/devenv-templates), one
-# subfolder with a devenv.yaml each. Every file is copied as-is, except:
+# live in $DEVENV_TEMPLATES_DIR/templates (default ~/code/repos/devenv-templates),
+# one subfolder with a devenv.yaml each. The same template serves every mode:
+# --shared and --copy write it into the repo, --personal into a folder of its
+# own on this machine. Every file is copied as-is, except:
 #   - `gitignore` is not copied; its lines are appended to the target's .gitignore
 #     when missing.
 #   - `@NAME@` is replaced with the target folder's name (lowercased, [a-z0-9-]).
 #   - a devenv.yaml it writes gets devenv's own modules pinned to the version
 #     of the devenv on this machine (see pin_devenv).
-#   - with --copy, devenv.yaml imports the parts from devenv-shared/ in the
+#   - with --copy, devenv.yaml imports the parts from .shared-devenv/ in the
 #     repo instead, and the parts are copied there.
 # Existing files are left alone unless -f is given.
 set -euo pipefail
@@ -39,17 +41,17 @@ Pick who owns the setup:
               devenv.lock pins the commit; `update-shared` takes a newer one.
               One setup for every project, improved in one place.
 
-  --copy      the parts are copied into the repo, in devenv-shared/, and are
+  --copy      the parts are copied into the repo, in .shared-devenv/, and are
               the repo's own from then on: no devenv-templates input, nothing
               pulled. Edit them freely; nobody else's change reaches them.
 
-  --personal  nothing goes into the repo's history: this machine binds the
-              folder to the template (devenv --from). For a repo you can't
-              commit devenv files to. Follows devenv-templates' main.
+  --personal  nothing goes into the repo's history. The template is written
+              to a folder on this machine, and the repo bound to it (devenv
+              --from). For a repo you can't commit devenv files to. Pinned
+              like --shared, in a devenv.lock that stays on this machine.
 
 In every mode devenv.lock pins nixpkgs, and so the SDK; `update-toolchain`
-moves it. With --shared and --copy that lock is committed; with --personal
-it stays on this machine.
+moves it. With --shared and --copy that lock is committed.
 
   e.g.  devenvify --shared dotnet
 EOF
@@ -62,8 +64,8 @@ EOF
 # the installed version, the modules can never be newer than the command, and
 # a later, newer devenv still loads them fine.
 #
-# Added here rather than written into the templates, so a template stays a
-# valid devenv.yaml for `nix flake init -t`, which copies files verbatim.
+# Added here rather than written into the templates, because the version is
+# this machine's.
 pin_devenv() {
   local yaml=$1 version
   grep -qE '^[[:space:]]+devenv:' "$yaml" && return 0
@@ -81,10 +83,10 @@ pin_devenv() {
   echo "pinned devenv $version in devenv.yaml"
 }
 
-# A template is a folder with a devenv.yaml; modules/ and from/ are not.
+# A template is a folder in templates/ with a devenv.yaml.
 list_templates() {
   echo "Templates in $templates_dir:"
-  for t in "$templates_dir"/*/; do
+  for t in "$templates_dir"/templates/*/; do
     if [ -f "$t/devenv.yaml" ]; then echo "  $(basename "$t")"; fi
   done
 }
@@ -114,12 +116,12 @@ write_file() {
 }
 
 # --copy: the template's devenv.yaml without the devenv-templates input, its
-# imports pointing at the copies in devenv-shared/.
+# imports pointing at the copies in .shared-devenv/.
 copy_yaml() {
   sed -E \
     -e '/^  # The shared setup/,/^    flake: false/d' \
-    -e 's|^# The parts this project uses\.|# The parts this project uses, copied into devenv-shared/ by devenvify --copy\n# and owned by this repo.|' \
-    -e 's|devenv-templates/modules/|./devenv-shared/|' \
+    -e 's|^# The parts this project uses\.|# The parts this project uses, copied into .shared-devenv/ by devenvify --copy\n# and owned by this repo.|' \
+    -e 's|devenv-templates/modules/|./.shared-devenv/|' \
     "$1"
 }
 
@@ -136,7 +138,7 @@ copy_parts() {
       exit 1
     fi
     while IFS= read -r -d '' file; do
-      local rel="devenv-shared/$part/${file#"$dir"/}"
+      local rel=".shared-devenv/$part/${file#"$dir"/}"
       if [ "${file##*.}" = nix ]; then
         { printf '# Copied from %s modules/%s by devenvify --copy, %s.\n' "$from" "$part" "$(date +%F)"
           printf "# This repo's own copy now: edit it freely; update-shared does not touch it.\n#\n"
@@ -149,34 +151,53 @@ copy_parts() {
 }
 
 # --personal: use a template in a repo that must not get devenv files: a
-# customer's, an open-source project. devenv binds the folder to
-# from/<template> on this machine only; colleagues who want the same run the
-# same command.
+# customer's, an open-source project. The template's devenv.yaml goes into a
+# folder of this machine's, with a devenv.nix for your own additions, and
+# devenv binds the repo to that folder (`devenv --from ... allow`).
+# Colleagues who want the same run the same command.
+#
+# The yaml imports the parts through the devenv-templates input, the same as
+# --shared; a --from folder's devenv.yaml may not import relative paths
+# outside itself, but inputs are fine. devenv keeps the lock in the repo
+# folder, hidden from git below, and `update-shared` moves it as usual.
 bind() {
-  local src
-  if [ ! -f "$templates_dir/from/$template/devenv.nix" ]; then
-    echo "No template '$template' to bind." >&2
-    list_templates >&2
-    exit 1
-  fi
+  local pdir
   if ! command -v devenv >/dev/null 2>&1; then
     echo "devenv is not on PATH." >&2
     exit 1
   fi
-  # A devenv.nix in the folder silently replaces a binding -- the shell would
-  # be the folder's, not the template's.
-  if [ -e "$target/devenv.nix" ]; then
-    echo "$target has its own devenv.nix, which would replace the binding." >&2
-    echo "Use --shared or --copy here, or remove devenv.nix first." >&2
+  # Devenv files in the folder would silently replace or mix with the
+  # binding -- the shell would not be the template's.
+  if [ -e "$target/devenv.nix" ] || [ -e "$target/devenv.yaml" ]; then
+    echo "$target has devenv files of its own, which would override the binding." >&2
+    echo "Use --shared or --copy here, or remove devenv.nix and devenv.yaml first." >&2
     exit 1
   fi
-  case "$templates_repo" in
-    path:*) src="$templates_repo/from/$template" ;;   # a local source takes a plain path
-    *) src="$templates_repo?dir=from/$template" ;;
-  esac
   mkdir -p "$target"
+  name="$(basename "$target" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9-]/-/g')"
+  pdir="${XDG_DATA_HOME:-$HOME/.local/share}/devenvify/personal/$name-$(printf %s "$target" | sha256sum | cut -c1-8)"
+
+  if [ -f "$pdir/devenv.yaml" ] && [ "$force" -eq 0 ]; then
+    echo "kept   $pdir (exists, -f to start over from the template)"
+  else
+    mkdir -p "$pdir"
+    target=$pdir write_file devenv.yaml "$src/devenv.yaml" > /dev/null
+    pin_devenv "$pdir/devenv.yaml" > /dev/null
+    cat > "$pdir/devenv.nix" <<EOF
+{ pkgs, lib, config, ... }:
+
+{
+  # Your own additions for $target, on this machine only.
+  # The parts are listed under \`imports:\` in devenv.yaml next to this file.
+  #
+  #   packages = [ pkgs.nodejs ];
+}
+EOF
+    echo "wrote  $pdir/devenv.yaml and devenv.nix (this machine's, for this folder)"
+  fi
+
   cd "$target"
-  devenv --from "$src" allow
+  devenv --from "path:$pdir" allow
 
   # devenv still keeps its state in the folder (.devenv/, devenv.lock), and
   # direnv needs an .envrc to load the shell on cd -- which is also how VS
@@ -250,7 +271,7 @@ fi
 
 template="${args[0]}"
 target="$(realpath "${args[1]:-.}")"
-src="$templates_dir/$template"
+src="$templates_dir/templates/$template"
 
 if [ ! -f "$src/devenv.yaml" ]; then
   echo "No template '$template'." >&2
